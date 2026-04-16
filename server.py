@@ -1,150 +1,93 @@
-from fastapi import FastAPI, APIRouter, HTTPException, status
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, EmailStr, Field
-from typing import Optional, List
+from flask import Flask, request, jsonify
+from flask_cors import CORS
 from datetime import datetime, timezone
 import uuid
 import os
 from dotenv import load_dotenv
-import logging
 
 # Load environment variables
 load_dotenv()
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# Initialize FastAPI app
-app = FastAPI(
-    title="ToolVerse API",
-    description="Backend API for ToolVerse platform",
-    version="1.0.0"
-)
+app = Flask(__name__)
 
 # Configure CORS
 cors_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000,https://toolverse.vercel.app").split(",")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=cors_origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+CORS(app, origins=cors_origins)
 
-# In-memory storage (simple, no MongoDB needed)
+# In-memory storage
 users_db = []
 
-# Create router
-api_router = APIRouter(prefix="/api")
+# Helper functions
+def find_user_by_email(email):
+    return next((u for u in users_db if u["email"] == email), None)
 
-# ============= MODELS =============
+def find_user_by_id(user_id):
+    return next((u for u in users_db if u["id"] == user_id), None)
 
-class UserCreate(BaseModel):
-    name: str = Field(..., min_length=2, max_length=100)
-    email: EmailStr
-    education: str
-    domain: str
-    level: Optional[str] = None
+# ============= ROUTES =============
 
-class UserResponse(BaseModel):
-    id: str
-    name: str
-    email: EmailStr
-    education: str
-    domain: str
-    level: Optional[str]
-    created_at: datetime
-
-class HealthResponse(BaseModel):
-    status: str
-    timestamp: datetime
-    database: str
-
-# ============= API ENDPOINTS =============
-
-@api_router.get("/", tags=["Root"])
-async def root():
-    return {
-        "message": "Welcome to ToolVerse API",
+@app.route('/')
+def home():
+    return jsonify({
+        "name": "ToolVerse API",
         "version": "1.0.0",
-        "status": "running"
-    }
-
-@api_router.get("/health", response_model=HealthResponse, tags=["Health"])
-async def health_check():
-    return HealthResponse(
-        status="healthy",
-        timestamp=datetime.now(timezone.utc),
-        database="in-memory (no MongoDB)"
-    )
-
-@api_router.post("/users", response_model=UserResponse, status_code=status.HTTP_201_CREATED, tags=["Users"])
-async def create_user(user: UserCreate):
-    """
-    Create a new user
-    """
-    try:
-        # Check if user already exists
-        existing_user = next((u for u in users_db if u["email"] == user.email), None)
-        if existing_user:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="User with this email already exists"
-            )
-        
-        # Create new user
-        new_user = {
-            "id": str(uuid.uuid4()),
-            "name": user.name,
-            "email": user.email,
-            "education": user.education,
-            "domain": user.domain,
-            "level": user.level,
-            "created_at": datetime.now(timezone.utc)
+        "status": "running",
+        "endpoints": {
+            "health": "/api/health",
+            "users": "/api/users",
+            "domains": "/api/domains"
         }
-        
-        users_db.append(new_user)
-        logger.info(f"User created: {user.email}")
-        
-        return UserResponse(**new_user)
+    })
+
+@app.route('/api/health')
+def health():
+    return jsonify({
+        "status": "healthy",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "database": "in-memory"
+    })
+
+@app.route('/api/users', methods=['POST'])
+def create_user():
+    data = request.get_json()
     
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error creating user: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Internal server error: {str(e)}"
-        )
+    # Validate required fields
+    required = ['name', 'email', 'education', 'domain']
+    for field in required:
+        if field not in data:
+            return jsonify({"error": f"Missing field: {field}"}), 400
+    
+    # Check if user exists
+    if find_user_by_email(data['email']):
+        return jsonify({"error": "User with this email already exists"}), 400
+    
+    # Create new user
+    new_user = {
+        "id": str(uuid.uuid4()),
+        "name": data['name'],
+        "email": data['email'],
+        "education": data['education'],
+        "domain": data['domain'],
+        "level": data.get('level'),
+        "created_at": datetime.now(timezone.utc).isoformat()
+    }
+    
+    users_db.append(new_user)
+    return jsonify(new_user), 201
 
-@api_router.get("/users", response_model=List[UserResponse], tags=["Users"])
-async def get_users():
-    """
-    Get all users
-    """
-    return users_db
+@app.route('/api/users', methods=['GET'])
+def get_users():
+    return jsonify(users_db)
 
-@api_router.get("/users/{user_id}", response_model=UserResponse, tags=["Users"])
-async def get_user(user_id: str):
-    """
-    Get a specific user by ID
-    """
-    user = next((u for u in users_db if u["id"] == user_id), None)
+@app.route('/api/users/<user_id>', methods=['GET'])
+def get_user(user_id):
+    user = find_user_by_id(user_id)
     if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found"
-        )
-    return user
+        return jsonify({"error": "User not found"}), 404
+    return jsonify(user)
 
-# ============= DOMAIN ROADMAPS =============
-
-@api_router.get("/domains", tags=["Domains"])
-async def get_domains():
-    """
-    Get all available domains with roadmaps
-    """
+@app.route('/api/domains', methods=['GET'])
+def get_domains():
     domains = {
         "cyber-security": {
             "name": "Cyber Security 🔒",
@@ -309,34 +252,9 @@ async def get_domains():
             ]
         }
     }
-    return domains
+    return jsonify(domains)
 
-# Include router
-app.include_router(api_router)
-
-# ============= ROOT ENDPOINT =============
-
-@app.get("/")
-async def home():
-    return {
-        "name": "ToolVerse API",
-        "version": "1.0.0",
-        "status": "running",
-        "endpoints": {
-            "health": "/api/health",
-            "users": "/api/users",
-            "domains": "/api/domains"
-        }
-    }
-
-# ============= RUN SERVER =============
-
+# Run the app
 if __name__ == "__main__":
-    import uvicorn
     port = int(os.getenv("PORT", 8000))
-    uvicorn.run(
-        "server:app",
-        host="0.0.0.0",
-        port=port,
-        reload=True
-    )
+    app.run(host="0.0.0.0", port=port)
